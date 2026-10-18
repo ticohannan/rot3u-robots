@@ -133,7 +133,8 @@ end result and corrects the offsets.
 
 1. Upload `ik_demo`, `HOME`, then for 6 points spread over the work area: `M x y 0.5`, then `W`.
 2. Read where the jaw tips really are on the grid (±2.5 mm is fine) and their height.
-3. Make a CSV file, one line per point: the five pulses from `W`, then X cm, Y cm, tip height mm.
+3. Make a CSV file, one line per point: the first five pulses from `W` (channels 0–4; the sixth is the
+   gripper), then X cm, Y cm, tip height mm.
 4. `python tools/touch_refit.py firmware/ik_demo/robot_config.h firmware/ik_demo/task_config.h touches.csv --joints 0,3`
 5. Paste the replacement rows it prints, upload, and repeat one or two points to confirm.
 

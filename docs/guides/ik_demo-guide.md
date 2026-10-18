@@ -73,7 +73,7 @@ ECHO my demo
 HOME
 P 10 3 0
 GO
-WAIT put the next block at (12,-8), then Enter
+WAIT next block at (12,-8), then Enter
 P 12 -8 0
 GO
 END

@@ -1,5 +1,5 @@
 """Touch-test refit: correct joint offsets (and optionally the base-axis position) from where the jaw
-tips really landed, for a ROT3U arm (docs/guides/joint-mapping.md, step 7).
+tips really landed, for a ROT3U arm (docs/guides/joint-mapping.md, section 4).
 
 1. In ik_demo, for each of 4-8 grid points spread over the work area: `M x y 0.5`, then `W`.
 2. Write one line per point in a CSV file:  us0,us1,us2,us3,us4,X_cm,Y_cm,tip_mm

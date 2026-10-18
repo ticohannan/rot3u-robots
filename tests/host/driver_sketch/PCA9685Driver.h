@@ -9,7 +9,7 @@
 
 class PCA9685Driver : public RobotServoDriver {
 public:
-  static const uint8_t REG_MODE1 = 0x00, REG_LED0_ON_L = 0x06, REG_PRESCALE = 0xFE;
+  static const uint8_t REG_MODE1 = 0x00, REG_LED0_ON_L = 0x06, REG_ALL_OFF_H = 0xFD, REG_PRESCALE = 0xFE;
   static const uint8_t MODE1_RESTART = 0x80, MODE1_AI = 0x20, MODE1_SLEEP = 0x10;
   static const uint8_t PRESCALE_50HZ = 131;           // round(27 MHz / (4096 * 50)) - 1
 
@@ -29,6 +29,7 @@ public:
     }
     writeReg(REG_MODE1, MODE1_SLEEP);                  // sleep: prescale is writable
     writeReg(REG_PRESCALE, PRESCALE_50HZ);
+    writeReg(REG_ALL_OFF_H, 0x10);                     // every output full-off BEFORE waking: no old pulse resumes
     writeReg(REG_MODE1, 0x00);                         // wake
     delay(5);
     writeReg(REG_MODE1, MODE1_RESTART | MODE1_AI);

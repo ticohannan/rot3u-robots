@@ -2,7 +2,7 @@
 // Usage: host_<sketch> <log file> [state file]   (commands on stdin)
 //   stdin lines are sent to the sketch as serial lines, except directives:
 //     @run ms      run loop() for ms of simulated time
-//     @keyat ms    inject a keypress ('x') ms of simulated time from now
+//     @keyat ms [c] inject a keypress ms of simulated time from now: c alone, or 'x' + newline
 //     @idle text   send text as a line once the sketch has been quiet (no output, no servo
 //                  writes) for 1 s of simulated time inside delay() - answers a WAIT prompt
 // Log lines: C <command> | O <output line> | W <ch> <off counts> | T <ms>
@@ -14,7 +14,7 @@
 #include <iostream>
 std::deque<char> g_in; SerialShim Serial; WireShim Wire; EEPROMShim EEPROM;
 static unsigned long g_ms = 0; static FILE *g_log; static std::string g_line;
-static long g_keyAt = -1; static bool g_any = false;
+static long g_keyAt = -1; static char g_key = 'x'; static bool g_any = false;
 static std::deque<std::string> g_idle; static unsigned long g_act = 0;
 void g_char(char c) {
   std::cout << c; g_any = true; g_act = g_ms;
@@ -23,7 +23,7 @@ void g_char(char c) {
 }
 static void tick(unsigned long ms) {
   g_ms += ms;
-  if (g_keyAt >= 0 && (long)g_ms >= g_keyAt) { g_in.push_back('x'); g_in.push_back('\n'); g_keyAt = -1; }
+  if (g_keyAt >= 0 && (long)g_ms >= g_keyAt) { g_in.push_back(g_key); if (g_key == 'x') g_in.push_back('\n'); g_keyAt = -1; }
 }
 static void idleFeed() {
   if (!g_idle.empty() && g_in.empty() && g_ms - g_act > 1000) {
@@ -44,6 +44,9 @@ uint8_t WireShim::endTransmission(bool) {
     reg[r] = tx[i];
   }
   if (tx.size() >= 2 && tx[0] == 0x00) reg[0] &= 0x7F;   // RESTART bit reads back clear
+  if (tx.size() == 2 && tx[0] == 0xFD) {                 // ALL_LED_OFF_H loads every channel's OFF_H
+    for (int ch = 0; ch < 16; ch++) { reg[6 + 4 * ch + 3] = tx[1]; if (tx[1] & 0x10) fprintf(g_log, "W %d 4096 %lu ALL\n", ch, g_ms); }
+  }
   if (tx.size() == 5 && ptr >= 6 && ptr < 6 + 4 * 16) {
     int ch = (ptr - 6) / 4; int off = tx[3] | (tx[4] << 8); g_act = g_ms;
     fprintf(g_log, "W %d %d %lu\n", ch, off, g_ms);
@@ -80,7 +83,11 @@ int main(int argc, char **argv) {
   while (std::getline(std::cin, line)) {
     if (!line.empty() && line.back() == '\r') line.pop_back();
     if (line.rfind("@run ", 0) == 0) { runFor(atol(line.c_str() + 5)); continue; }
-    if (line.rfind("@keyat ", 0) == 0) { g_keyAt = (long)g_ms + atol(line.c_str() + 7); continue; }
+    if (line.rfind("@keyat ", 0) == 0) {          // @keyat ms [c]: c alone (no newline), default "x\n"
+      char *e; g_keyAt = (long)g_ms + strtol(line.c_str() + 7, &e, 10);
+      g_key = (*e == ' ' && e[1]) ? e[1] : 'x';
+      continue;
+    }
     if (line.rfind("@idle", 0) == 0) { g_idle.push_back(line.size() > 6 ? line.substr(6) : std::string()); continue; }
     std::cout << ">> " << line << "\n";
     fprintf(g_log, "C %s\n", line.c_str());

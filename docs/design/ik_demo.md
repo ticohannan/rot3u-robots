@@ -22,13 +22,15 @@ way; the Demo 3 video script runs unchanged (test `test_demo3_regression`).
 | --- | --- |
 | IK-S1 | While `CAL_VALID` is false the sketch solves and prints but never moves (`DRY` is forced on) |
 | IK-S2 | Every pulse is clamped to the channel's soft limits as the last step before the driver |
-| IK-S3 | Every joint-space move is sampled through forward kinematics first (24 points); it is refused if the jaws, a carried block or the elbow would go below the paper, or would pass through a known stack. If the direct move fails, it goes through the **via pose** (`VIA_DEG` in `robot_config.h`): up to it with base and roll unchanged, base and roll turn there, then down to the target, each leg checked the same way |
+| IK-S3 | Every joint-space move is sampled through forward kinematics first (24 points); it is refused if the jaws, a carried block or the elbow would go below the paper, or would pass through a known stack. If the direct move fails, it goes through the **via pose** (`VIA_DEG` in `robot_config.h`): up to it with base and roll unchanged, base and roll turn there, then down to the target. The first and last legs are path-checked; the middle leg turns only the base and roll at the via pose's height |
 | IK-S9 | A transfer is planned completely before anything moves: every vertical line (descend, lift, lower, clear) is solved every 2.5 mm, and the carry move is path-checked. A transfer that cannot be completed is refused with the arm still |
 | IK-S4 | Straight-line moves stop if any joint would jump more than `JUMP_US` between points (the arm is not where the plan expects) |
 | IK-S5 | The elbow is kept at least `MIN_BEND` from straight (singular) |
 | IK-S6 | Any key stops a move and holds. During `RUN`, any key stops the program |
 | IK-S7 | On boot, live channels are adopted (DD-DRV). The first `HOME` gives a first pulse to idle channels one at a time, base outward |
 | IK-S8 | `AIR mm` raises every commanded height for rehearsal; the world model is not changed while AIR is non-zero |
+| IK-S11 | Non-finite numbers (nan, inf) are refused at input, and every solve result is checked before it is used; a joint angle that is not finite never reaches the pulse calculation |
+| IK-S12 | `HOME` with some channels idle gives first pulses to the idle ones only; the channels already holding then move by the normal retreat-and-checked path |
 | IK-S10 | The lowest jaw point is the tip, lowered by `JAW_HALF_MM` × the tool's horizontal component (a tilted or horizontal gripper reaches lower than its tip) |
 
 ### Generality (new in v1.0)
@@ -48,7 +50,7 @@ way; the Demo 3 video script runs unchanged (test `test_demo3_regression`).
 | ID | Requirement |
 | --- | --- |
 | IK-L1 | The calibration line is the centre of each joint's play (DD-CFG §2). With compensation off, pulses come from the centre line |
-| IK-L2 | With compensation on, pulse = US0 + USPD·(θ − (LASH/2)·side). For gravity-loaded joints, side = sign of the gravity torque from the mass model, including the carried block; inside the balance band (\|torque\| < `BAL_BAND_NMM`) and for unloaded joints, side = −sign(direction of the move into the pose) |
+| IK-L2 | With compensation on, pulse = US0 + USPD·(θ − (LASH/2)·side). For gravity-loaded joints, side = sign of the gravity torque from the mass model, including the carried block; inside the balance band (\|torque\| < `BAL_BAND_GMM`, in g·mm) and for unloaded joints, side = −sign(direction of the move into the pose) |
 | IK-L3 | After every `P`, the sketch prints the correction compensation would apply to the selected solution (µs per joint) and the predicted grasp-point error without it (mm), so the person can choose `LASH ON` or `LASH OFF` |
 | IK-L4 | With `LASH` = 0 for every joint, compensation changes nothing |
 
@@ -105,7 +107,8 @@ A transfer moves the top block of a source stack to the top of a destination sta
    destination. The block rotation R = R_place·R_pickᵀ (tool rotations from FK). The block's new
    vertical extent ez = Σ|R₃ⱼ|·sⱼ, the new grasp height above the destination top
    = ez/2 + (R·g)_z, where g is the grasp point's offset from the block centre at pick. Orientation
-   class: upright if R₃₃ > 0.9, upside down if R₃₃ < −0.9, otherwise on its side. Accepted per
+   class, with t = `LEVEL_TOL_DEG`: upright if R₃₃ > cos t, upside down if R₃₃ < −cos t, on its side if
+   |R₃₃| < sin t and one horizontal axis is vertical, otherwise tilted (always refused). Accepted per
    `FLIP`. Place grasp, place hover (+`CLEAR_MM` + 10 mm for the carried block) and the clear-up
    pose must be reachable.
 4. **Preference order** among complete candidates: orientation (upright first for `FLIP` 0/1, flipped
@@ -119,8 +122,9 @@ A transfer moves the top block of a source stack to the top of a destination sta
    any motion.
 6. **Sequence:** open; hover above the source; descend; grip; lift to the carry height; carry; lower
    onto the destination; release; clear straight up; return to the ready pose.
-7. **World update** after release (only when not `DRY` and `AIR` = 0): source count −1 (its top drops
-   by sz), destination count +1 (its top rises by ez).
+7. **World update** (only when not `DRY` and `AIR` = 0): after the grip, source count −1 (its top drops
+   to the picked block's bottom); after the release, destination count +1 (its top rises by ez). Up to
+   12 stacks; a new destination when all 12 are in use is refused.
 
 `P x y z` + `GO` is one transfer with the source at (x, y, z) and the destination at `DEST`. A solution
 counts toward "N solutions detected" when the whole transfer from that pick can be planned (steps 1–5,
@@ -152,11 +156,11 @@ step; `lastSide` is kept per joint for steps where a joint does not move.
 | `S k` | Select solution k (1–8) |
 | `GO` | Pick the target with the selected solution, place it at `DEST` |
 | `T k` | Preview solution k at the hover pose (no gripping) |
-| `STACK n` | Set the number of blocks at `DEST` |
-| `MAP z` | Solution-count map for a block bottom at z cm (automatic approach angle) |
-| `HOME` | Ready pose (straight-up retreat first if low) |
+| `STACK n` | Set the number of blocks at `DEST` (0–6) |
+| `MAP z` | Solution-count map for a block bottom at z cm (best angle of `APPROACH_LIST`, or the fixed `A` angle) |
+| `HOME` | Ready pose: if low, first straight up as far as the line allows, then a path-checked move |
 | `M x y z` | Jaw tips over paper (x, y) at height z cm (touch test) |
-| `J a b c d e` | Joint angles θ1..θ5*, deg |
+| `J a b c d e` | Joint angles θ1..θ5*, deg. Checks joint limits and the path, not `MIN_BEND` |
 | `G O|C|us` | Gripper open / hold / pulse |
 | `W` | Where: pulses, angles, grasp point on the paper |
 | `AIR mm`, `DRY 1|0`, `SPD n`, `CAL`, `!` | As v0.4 |
@@ -173,11 +177,11 @@ step; `lastSide` is kept per joint for steps where a joint does not move.
 | `BRANCH A|F|B` | Any / front only / behind the back only |
 | `FLIP 0|1|2` | Transport orientation policy (IK-G4) |
 | `LASH ON|OFF` | Backlash compensation |
-| `STK x y n` | Declare a stack of n blocks at (x, y); n = 0 removes it; `STK CLR` clears all |
+| `STK x y n` | Declare a stack of n blocks (0–9) at (x, y); n = 0 removes it (DEST is kept); `STK CLR` clears all |
 | `WORLD` | List the stacks |
 | `MV x1 y1 x2 y2` | Transfer the top block of the stack at (x1, y1) to the stack at (x2, y2) |
 | `TOWER x y n` | Transfer blocks from the other stacks, in the order declared, until (x, y) has n |
-| `PROG` … `END` | Record a program (up to 24 lines); `RUN` plays it; `LIST`; `PCLR` clears |
+| `PROG` … `END` | Record a program (up to 24 lines of up to 48 characters; a longer line is refused); `RUN` plays it; `LIST`; `PCLR` clears |
 | `WAIT text` | (in a program) print the text and wait for Enter |
 | `ECHO text` | (in a program) print the text |
 
@@ -193,13 +197,15 @@ the driver choice. From `task_config.h`: everything in DD-CFG §6 plus `LEVEL_TO
 | Requirement | Test (`tests/test_ik_demo.py`) |
 | --- | --- |
 | IK-S1 | `test_cal_invalid_never_moves` |
+| IK-S11 | `test_non_finite_refused` |
+| IK-S12 | `test_home_with_idle_gripper` |
 | IK-S3, IK-S9 | `test_path_check_refuses_stack_collision`, `test_carry_raises_over_stack`, `test_flip_policy` (uses the via pose) |
 | IK-S6 | `test_keypress_stops` |
 | IK-G1 | `test_frame_rotation_invariance` |
 | IK-G2 | `test_back_branch` |
 | IK-G3 | `test_grip_depth` |
 | IK-G4 | `test_flip_policy` |
-| IK-G5, IK-G6 | `test_world_mv_tower`, `test_program_run` |
+| IK-G5, IK-G6 | `test_world_mv_tower`, `test_program_run`, `test_program_line_too_long`, `test_stack_table_full` |
 | IK-L1–L4 | `test_lash_off_is_centre_line`, `test_lash_sides`, `test_lash_suggestion`, `test_zero_lash_no_change` |
 | Regression | `test_demo3_regression` (the Demo 3 video script, FK-checked) |
 | Reference model agrees with the firmware | `tests/test_tools.py::test_reference_fk_matches_firmware` |

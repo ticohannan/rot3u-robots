@@ -49,7 +49,7 @@ class Log:
         return [(int(r.split()[0]), int(r.split()[1])) for t, r in self.events if t == "W"]
 
     def writes_t(self):
-        return [tuple(int(v) for v in r.split()) for t, r in self.events if t == "W"]
+        return [tuple(int(v) for v in r.split()[:3]) for t, r in self.events if t == "W"]
 
     def outputs(self):
         return [r for t, r in self.events if t == "O"]

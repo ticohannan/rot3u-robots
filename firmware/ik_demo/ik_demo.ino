@@ -74,7 +74,7 @@ uint16_t cur[NS];
 bool     active[NS];
 uint16_t sim[NS];                          // simulated pulses while DRY is on
 int8_t   lastSide[NJ];
-bool     dryRun = true, lashOn = LASH_COMP_DEFAULT, cmdFail = false;
+bool     dryRun = true, lashOn = LASH_COMP_DEFAULT, cmdFail = false, calBad = false;
 float    airMm = 0.0;
 uint8_t  rateUs = 5;
 
@@ -101,7 +101,7 @@ float    tgtPsi = -90;
 int8_t   sel = -1;
 
 // ---- programs (IK-G6)
-const uint8_t PROG_LINES = 24, PROG_LEN = 41;
+const uint8_t PROG_LINES = 24, PROG_LEN = 49;   // 48 characters per line
 char     prog[PROG_LINES][PROG_LEN];
 uint8_t  progN = 0;
 bool     recording = false, running = false;
@@ -112,6 +112,7 @@ uint32_t lastByte = 0;
 
 // ================================================================== basics
 float wrap180(float a) {
+  if (!isfinite(a)) return NAN;            // IK-S11: never loop on inf
   while (a > 180.0f)   a -= 360.0f;
   while (a <= -180.0f) a += 360.0f;
   return a;
@@ -154,6 +155,7 @@ float curDeg(uint8_t j, const uint16_t p[]) { return usToDeg(j, p[j]) + halfLash
 
 // The 360-degree equivalent of th nearest the middle of joint j's range; false if outside the range.
 bool fitJoint(uint8_t j, float &th, uint16_t &us) {
+  if (!isfinite(th)) return false;         // IK-S11
   float lo = limLo(j), hi = limHi(j), mid = 0.5f * (lo + hi);
   th = mid + wrap180(th - mid);
   if (th < lo - 0.01f || th > hi + 0.01f) return false;
@@ -241,6 +243,7 @@ uint8_t kinSolve(float x, float y, float z, float psi, uint8_t b, Sol &s) {
   uint8_t k = b & 3, r = b >> 2;
   s.bad = 255;
   for (uint8_t j = 0; j < NJ; j++) { s.th[j] = NAN; s.us[j] = 0; }
+  if (!isfinite(x) || !isfinite(y) || !isfinite(z) || !isfinite(psi)) return s.why = W_REACH;   // IK-S11
   float rxy = sqrtf(x * x + y * y), d = toolLen();
   if (rxy < KEEPOUT_R_MM) return s.why = W_KEEPOUT;
   float side = (k < 2) ? 1.0f : -1.0f;
@@ -306,8 +309,15 @@ int8_t setStack(float X, float Y, uint8_t n) {
   stk[i].n = n; stk[i].top = n * blk[2]; stk[i].topH = blk[2];
   return i;
 }
+void removeStack(float X, float Y) {
+  int8_t i = findStack(X, Y);
+  if (i < 0) return;
+  for (uint8_t k = i; k + 1 < nStk; k++) stk[k] = stk[k + 1];
+  nStk--;
+}
 int8_t destStack() { int8_t i = findStack(destX, destY); return i >= 0 ? i : setStack(destX, destY, 0); }
 float destTop() { int8_t i = findStack(destX, destY); return i >= 0 ? stk[i].top : 0.0f; }
+uint8_t destCount() { int8_t i = destStack(); return i >= 0 ? stk[i].n : 0; }
 
 void printWorld() {
   Serial.print(F("# world: ")); Serial.print(nStk); Serial.println(F(" stack(s)  (x y cm: blocks, top mm)"));
@@ -441,8 +451,14 @@ bool moveGrip(uint16_t us) {
 float graspUp();
 
 // Check a joint-space move by sampling it through FK (IK-S3): paper, elbow, and every known stack.
+bool anyNonFinite(const float a[NJ], const float b[NJ]) {
+  for (uint8_t j = 0; j < NJ; j++) if (!isfinite(a[j]) || !isfinite(b[j])) return true;
+  return false;
+}
+
 bool pathClear(const float thA[NJ], const float thB[NJ], bool carrying) {
   if (!CAL_VALID) return true;
+  if (anyNonFinite(thA, thB)) { Serial.println(F("# path check: a joint angle is not a number - not moving")); return false; }
   float gu = graspUp();
   for (uint8_t i = 1; i <= 24; i++) {      // the start pose is where the arm already is
     float f = (float)i / 24.0f, th[NJ];
@@ -475,6 +491,7 @@ bool pathClearQuiet(const float thA[NJ], const float thB[NJ], bool carrying);
 
 // One checked joint move between two angle sets (backlash compensation applied on arrival).
 bool legJ(const float from[NJ], const float to[NJ], bool carrying) {
+  if (anyNonFinite(from, to)) { Serial.println(F("# joint angle is not a number - not moving")); cmdFail = true; return false; }
   uint16_t t[NS];
   targetPulses(to, from, carrying, t, true);
   if (!moveJ(t, 0x1F)) { cmdFail = true; return false; }
@@ -681,6 +698,7 @@ uint8_t planTransfer(Plan &pl, float sx, float sy, float zbCm10, float psiP, uin
 
 bool pathClearQuiet(const float thA[NJ], const float thB[NJ], bool carrying) {
   // same test as pathClear, without printing (used while planning)
+  if (anyNonFinite(thA, thB)) return false;
   float gu = graspUp(), rad = 0.6f * (blk[0] + blk[1]);
   for (uint8_t i = 1; i <= 24; i++) {
     float f = (float)i / 24.0f, th[NJ];
@@ -713,6 +731,8 @@ bool readySol(Sol &s) {
   return false;
 }
 
+bool lineOk(float X, float Y, float z0, float z1, float psi, uint8_t b);
+
 // If the jaws are low, back straight up first, so HOME after a stop does not drag a block.
 bool retreatUp() {
   float th[NJ], x, y, z, tz, ez, lz, X, Y, zp;
@@ -734,7 +754,10 @@ bool retreatUp() {
     }
   }
   if (kb < 0) { Serial.println(F("# cannot work out a straight-up retreat from here - moving directly")); return true; }
-  Serial.println(F("# backing straight up first"));
+  // as high as the straight line allows (the joint limits can end it early); the next move is path-checked
+  while (zUp > zp + 5.0f && !lineOk(X, Y, zp, zUp, psiB, kb)) zUp -= 5.0f;
+  if (zUp <= zp + 5.0f) { Serial.println(F("# no straight-up retreat possible here - the next move is path-checked")); return true; }
+  Serial.print(F("# backing straight up first, to ")); Serial.print(zUp, 0); Serial.println(F(" mm"));
   return moveV(X, Y, zp, zUp, psiB, kb, false);
 }
 
@@ -749,16 +772,24 @@ void doHome() {
     if (goSol(r, false)) Serial.println(F("# at the ready pose"));
     return;
   }
+  // IK-S12: first pulses on the idle channels only; channels already holding then move the normal way
+  bool anyArmHolding = false;
+  for (uint8_t c = 0; c < NJ; c++) if (active[c]) anyArmHolding = true;
   Serial.println(F("# first pulse on idle channels, base outward - arm should be supported near the ready pose"));
   for (uint8_t c = 0; c < NS; c++) {
     if (active[c]) continue;
     applyUs(c, c < NJ ? r.us[c] : GRIP.openUs);
     emitPos(c, "START");
     delay(400);
+    if (keyStop()) return;
   }
   for (uint8_t j = 0; j < NJ; j++) lastSide[j] = 0;
-  uint16_t t[NS]; memcpy(t, r.us, sizeof(r.us));
-  if (moveJ(t, 0x1F)) Serial.println(F("# at the ready pose"));
+  if (anyArmHolding) {
+    if (!retreatUp()) return;
+    if (goSol(r, false)) Serial.println(F("# at the ready pose"));
+    return;
+  }
+  Serial.println(F("# at the ready pose"));
 }
 
 // ============================================================== commands
@@ -767,7 +798,7 @@ void printLashSuggestion(const Sol &g, float psi, uint8_t b) {
   for (uint8_t j = 0; j < NJ; j++) if (JOINTS[j].lash > 0) any = true;
   if (!any) { Serial.println(F("# backlash: not measured for this robot (LASH = 0) - nothing to compensate")); return; }
   Sol h;
-  solvePaper(tgtX, tgtY, tgtZb + blk[2] + CLEAR_MM + gripDepth + airMm, psi, b, h);
+  if (solvePaper(tgtX, tgtY, tgtZb + blk[2] + CLEAR_MM + gripDepth + airMm, psi, b, h) != S_OK) return;
   bool keep = lashOn; lashOn = true;
   uint16_t comp[NJ];
   int8_t saved[NJ]; memcpy(saved, lastSide, sizeof(saved));
@@ -848,7 +879,10 @@ void doPreview(int k) {
   if (k < 1 || k > 8 || solWhy[numToB(k)] != S_OK) { Serial.println(F("# that solution is not valid")); cmdFail = true; return; }
   Sol h;
   float zH = tgtZb + blk[2] + CLEAR_MM + gripDepth + airMm;
-  solvePaper(tgtX, tgtY, zH, tgtPsi, numToB(k), h);
+  if (solvePaper(tgtX, tgtY, zH, tgtPsi, numToB(k), h) != S_OK) {
+    Serial.print(F("# hover pose not reachable now: ")); printWhy(h.why, h.bad); Serial.println(F(" - P again"));
+    cmdFail = true; return;
+  }
   Serial.print(F("# preview SOL ")); Serial.print(k); Serial.print(F(" at the hover pose, th* =")); printAngles(h.th); Serial.println();
   goSol(h, false);
 }
@@ -875,26 +909,27 @@ bool runTransfer(float sx, float sy, float zb, float psiP, uint8_t bP) {
   Serial.print(F(", lift to ")); Serial.print(pl.zL, 0); Serial.print(F(" mm, carry at ")); Serial.print(pl.zP, 0); Serial.println(F(" mm"));
   Sol s;
   stepMsg(1, F("open the gripper"));        if (!moveGrip(GRIP.openUs)) goto fail;
-  stepMsg(2, F("hover above the block"));   solvePaper(sx, sy, pl.zH, psiP, bP, s); if (!goSol(s, false)) goto fail;
+  stepMsg(2, F("hover above the block"));   if (solvePaper(sx, sy, pl.zH, psiP, bP, s) != S_OK || !goSol(s, false)) goto fail;
   stepMsg(3, F("descend"));                 if (!moveV(sx, sy, pl.zH, pl.zG, psiP, bP, false)) goto fail;
   stepMsg(4, F("grip"));                    if (!moveGrip(GRIP.holdUs)) goto fail; if (!dryRun) delay(400);
   if (srcI >= 0 && !dryRun && airMm == 0.0f && stk[srcI].n > 0) {   // the block has left its stack
     stk[srcI].n--; stk[srcI].top = pl.zb; stk[srcI].topH = blk[2];
   }
   stepMsg(5, F("lift"));                    if (!moveV(sx, sy, pl.zG, pl.zL, psiP, bP, true)) goto fail;
-  stepMsg(6, F("carry"));                   solvePaper(pl.dx, pl.dy, pl.zP, pl.psiQ, pl.bQ, s); if (!goSol(s, true)) goto fail;
+  stepMsg(6, F("carry"));                   if (solvePaper(pl.dx, pl.dy, pl.zP, pl.psiQ, pl.bQ, s) != S_OK || !goSol(s, true)) goto fail;
   stepMsg(7, F("lower onto the destination")); if (!moveV(pl.dx, pl.dy, pl.zP, pl.pG, pl.psiQ, pl.bQ, true)) goto fail;
   stepMsg(8, F("release"));                 if (!moveGrip(GRIP.openUs)) goto fail; if (!dryRun) delay(300);
   if (!dryRun && airMm == 0.0f) {          // the block is on the destination now
     int8_t d = destStack();
     if (d >= 0) { stk[d].n++; stk[d].top = pl.pzb + pl.ez; stk[d].topH = pl.ez; }
+    else Serial.println(F("# (destination not tracked: stack table full)"));
   }
   stepMsg(9, F("clear and return"));        if (!moveV(pl.dx, pl.dy, pl.pG, pl.pUp, pl.psiQ, pl.bQ, false)) goto fail;
   if (!readySol(s) || !goSol(s, false)) {
     Serial.println(F("# (could not return to the ready pose - the arm waits above the destination; HOME when clear)"));
     if (!keyStopped) cmdFail = false;      // the transfer itself is complete
   }
-  Serial.print(F("# done - tower count is now ")); Serial.println(stk[destStack()].n);
+  Serial.print(F("# done - tower count is now ")); Serial.println(destCount());
   return true;
 fail:
   Serial.println(F("# sequence stopped - arm holding. Fix it, then HOME (or G O to drop the block)"));
@@ -929,8 +964,8 @@ void doMove(float x1, float y1, float x2, float y2) {
   if (i < 0 || stk[i].n == 0) { Serial.println(F("# no known stack there - declare it with STK x y n")); cmdFail = true; return; }
   float kx = destX, ky = destY;
   destX = x2; destY = y2;
-  destStack();
-  autoTransfer((uint8_t)i);
+  if (destStack() < 0) { Serial.println(F("# too many stacks (12) - no room for the destination")); cmdFail = true; }
+  else autoTransfer((uint8_t)findStack(x1, y1));
   destX = kx; destY = ky;
 }
 
@@ -938,7 +973,8 @@ void doTower(float x, float y, uint8_t n) {
   float kx = destX, ky = destY;
   destX = x; destY = y;
   int8_t d = destStack();
-  while (d >= 0 && stk[d].n < n && !cmdFail) {
+  if (d < 0) { Serial.println(F("# too many stacks (12) - no room for the tower")); cmdFail = true; destX = kx; destY = ky; return; }
+  while (stk[d].n < n && !cmdFail) {
     int8_t src = -1;
     for (uint8_t i = 0; i < nStk; i++) if (i != (uint8_t)d && stk[i].n > 0) { src = i; break; }
     if (src < 0) { Serial.println(F("# no blocks left in the other stacks")); cmdFail = true; break; }
@@ -1010,7 +1046,7 @@ void doWhere() {
   Serial.print(F("# grasp point paper [")); Serial.print(X, 1); Serial.print(F(", ")); Serial.print(Y, 1);
   Serial.print(F("] cm, height ")); Serial.print(zp, 1); Serial.print(F(" mm (tips ")); Serial.print(tz + frZ0, 1); Serial.println(F(" mm)"));
   Serial.print(F("# DEST [")); Serial.print(destX, 1); Serial.print(F(", ")); Serial.print(destY, 1);
-  Serial.print(F("] tower count ")); Serial.print(stk[destStack()].n);
+  Serial.print(F("] tower count ")); Serial.print(destCount());
   Serial.print(F(", AIR ")); Serial.print(airMm, 0); Serial.print(F(" mm, DRY ")); Serial.print(dryRun ? 1 : 0);
   Serial.print(F(", SPD ")); Serial.print(rateUs); Serial.print(F(", LASH ")); Serial.println(lashOn ? F("ON") : F("OFF"));
 }
@@ -1084,10 +1120,13 @@ void printHelp() {
   Serial.println(F("# PROG ... END | RUN | LIST | PCLR | WAIT text | ECHO text"));
 }
 
-float nextF(bool &ok) {
+float nextF(bool &ok) {                  // IK-S11: only plain numbers (no nan, inf)
   char *t = strtok(NULL, " ,[]");
   if (!t) { ok = false; return 0; }
-  return atof(t);
+  char *e;
+  float v = strtod(t, &e);
+  if (e == t || *e != 0 || !isfinite(v)) { ok = false; Serial.print(F("# not a number: ")); Serial.println(t); return 0; }
+  return v;
 }
 
 // ============================================================== programs
@@ -1103,6 +1142,7 @@ void loadStartProgram() {
       continue;
     }
     if (progN < PROG_LINES && len < PROG_LEN - 1) prog[progN][len++] = c;
+    else if (progN < PROG_LINES) { Serial.print(F("# WARNING start program line ")); Serial.print(progN + 1); Serial.println(F(" too long - cut off")); while (pgm_read_byte(START_PROGRAM + i + 1) && pgm_read_byte(START_PROGRAM + i + 1) != '\n') i++; }
   }
 }
 void listProgram() {
@@ -1147,6 +1187,7 @@ void handleLine(char *line) {
     for (char *p = tmp; *p; p++) *p = toupper(*p);
     if (!strncmp(tmp, "END", 3)) { recording = false; Serial.print(F("# program recorded: ")); Serial.print(progN); Serial.println(F(" line(s) - RUN plays it")); return; }
     if (progN >= PROG_LINES) { Serial.println(F("# program full")); return; }
+    if (strlen(line) > PROG_LEN - 1) { Serial.print(F("# line refused: longer than ")); Serial.print(PROG_LEN - 1); Serial.println(F(" characters")); return; }
     strncpy(prog[progN], line, PROG_LEN - 1); prog[progN][PROG_LEN - 1] = 0; progN++;
     Serial.print(F("#  ")); Serial.print(progN); Serial.print(F(": ")); Serial.println(prog[progN - 1]);
     return;
@@ -1186,7 +1227,8 @@ void handleLine(char *line) {
   if (!strcmp(cmd, "STACK")) {
     float n = nextF(ok);
     if (!ok || n < 0 || n > 6) { Serial.println(F("# STACK 0-6")); cmdFail = true; return; }
-    setStack(destX, destY, (uint8_t)n); Serial.print(F("# tower count ")); Serial.println((int)n); return;
+    if (setStack(destX, destY, (uint8_t)n) < 0) { Serial.println(F("# too many stacks (12)")); cmdFail = true; return; }
+    Serial.print(F("# tower count ")); Serial.println((int)n); return;
   }
   if (!strcmp(cmd, "MAP"))  { float z = nextF(ok); doMap(ok ? z : 0.0f); return; }
   if (!strcmp(cmd, "M")) {
@@ -1210,13 +1252,13 @@ void handleLine(char *line) {
   if (!strcmp(cmd, "AIR")) {
     float a = nextF(ok);
     if (!ok || a < 0 || a > 100) { Serial.println(F("# AIR 0-100 (mm)")); return; }
-    airMm = a; Serial.print(F("# AIR ")); Serial.print(airMm, 0);
+    airMm = a; haveTgt = false; Serial.print(F("# AIR ")); Serial.print(airMm, 0);
     Serial.println(F(" mm - every commanded height is raised; P again to re-solve")); return;
   }
   if (!strcmp(cmd, "DRY")) {
     float d = nextF(ok);
     if (!ok) { Serial.println(F("# DRY 1 | 0")); return; }
-    if (d == 0 && !CAL_VALID) { Serial.println(F("# CAL_VALID is false - DRY stays on")); return; }
+    if (d == 0 && (!CAL_VALID || calBad)) { Serial.println(F("# CAL_VALID is false or the limits are invalid - DRY stays on")); return; }
     dryRun = (d != 0);
     memcpy(sim, cur, sizeof(cur));
     Serial.print(F("# DRY ")); Serial.println(dryRun ? 1 : 0); return;
@@ -1262,7 +1304,8 @@ void handleLine(char *line) {
     if (!ok) { Serial.println(F("# DEST x y (paper cm)")); return; }
     destX = a; destY = b; destStack(); haveTgt = false;
     Serial.print(F("# destination [")); Serial.print(a, 1); Serial.print(F(", ")); Serial.print(b, 1);
-    Serial.print(F("], ")); Serial.print(stk[destStack()].n); Serial.println(F(" block(s) there")); return;
+    if (destStack() < 0) { Serial.println(F("# too many stacks (12) - DEST not tracked")); cmdFail = true; }
+    Serial.print(F("], ")); Serial.print(destCount()); Serial.println(F(" block(s) there")); return;
   }
   if (!strcmp(cmd, "BRANCH")) {
     char *t = strtok(NULL, " ");
@@ -1286,9 +1329,13 @@ void handleLine(char *line) {
   if (!strcmp(cmd, "STK")) {
     char *t = strtok(NULL, " ,");
     if (t && toupper(t[0]) == 'C') { nStk = 0; destStack(); Serial.println(F("# stacks cleared")); return; }
-    float x = t ? atof(t) : 0, y = nextF(ok), n = nextF(ok);
+    char *e = NULL;
+    float x = t ? strtod(t, &e) : 0, y = nextF(ok), n = nextF(ok);
+    if (t && (e == t || *e != 0 || !isfinite(x))) ok = false;
     if (!t || !ok || n < 0 || n > 9) { Serial.println(F("# STK x y n   (n = 0 empties it) | STK CLR")); return; }
-    if (setStack(x, y, (uint8_t)n) < 0) Serial.println(F("# too many stacks"));
+    if (n == 0) removeStack(x, y);
+    else if (setStack(x, y, (uint8_t)n) < 0) { Serial.println(F("# too many stacks (12)")); cmdFail = true; }
+    destStack();
     printWorld(); return;
   }
   if (!strcmp(cmd, "MV")) {
@@ -1310,6 +1357,7 @@ void readSerial() {
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\n' || c == '\r') {
+      if (c == '\r') { delay(2); if (Serial.peek() == '\n') Serial.read(); }   // CR+LF is one line ending
       if (blen) { buf[blen] = 0; blen = 0; handleLine(buf); }
       continue;
     }
@@ -1327,6 +1375,11 @@ void setup() {
   Serial.print(F("# READY ik_demo v" FW_VERSION " (")); Serial.print(F(ROBOT_NAME)); Serial.print(F("), driver "));
   Serial.println(servo.name());
   dryRun = !CAL_VALID;
+  for (uint8_t s = 0; s < NS; s++) if (slotMin(s) >= slotMax(s)) {
+    Serial.print(F("# ERROR ch ")); Serial.print(slotCh(s)); Serial.println(F(" has MIN >= MAX in robot_config.h - DRY forced on"));
+    calBad = true;
+  }
+  if (calBad) dryRun = true;
   for (uint8_t s = 0; s < NS; s++) { cur[s] = 1500; active[s] = false; }
   for (uint8_t j = 0; j < NJ; j++) lastSide[j] = 0;
   if (!servo.begin(true)) Serial.println(F("# WARNING servo driver did not answer - check wiring"));

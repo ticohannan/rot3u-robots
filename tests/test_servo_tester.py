@@ -104,7 +104,7 @@ def _lash_cmds(u0, k, lash, extra_sides=True):
     cmds = ["LIM 1 500 2500", "SEL 1", "JT ROT shoulder", "START 1500", "PREC 0.5"]
     for us in (800, 1200, 1600, 2000, 2300):
         for d in ("+", "-") if extra_sides else ("+",):
-            side = -1 if d == "+" else 1
+            side = (-1 if d == "+" else 1) * (1 if k > 0 else -1)   # value terms: lags behind the joint's motion
             cmds += [f"APPR {d} {us}", f"PT {(us - u0) / k + h * side:.3f}"]
     return cmds
 
@@ -127,8 +127,8 @@ def test_fit_recovers_lash():                           # ST-M5, ST-M4
 def test_auto_side_from_motion():                       # ST-M4
     out, _ = run(["LIM 1 500 2500", "SEL 1", "START 1500", "APPR + 1400", "PT 90", "APPR - 1400", "PT 91",
                   "SIDE -", "GO 1500", "PT 92", "SIDE A", "LOAD 1", "PT 93"])
-    sides = [int(p[8]) for p in pt_lines(out)]
-    assert sides == [-1, 1, -1, -1], sides
+    sides = [p[8] for p in pt_lines(out)]
+    assert sides == ["-1A", "1A", "-1", "-1A"], sides
     assert "gravity-loaded joint with SIDE A" in out
 
 
@@ -189,3 +189,36 @@ def test_session_survives_reset():                      # ST-M8
     b2, r2, g2 = parse_export(out2)
     assert r1 == r2 and g1.groups() == g2.groups()
     assert "NOT applied" in out2
+
+
+def test_fit_lash_negative_slope():                     # ST-M5 with a reversed servo (negative USPD)
+    u0, k = 332.1, -11.587
+    cmds = [c.replace("LIM 1", "LIM 2").replace("SEL 1", "SEL 2").replace("shoulder", "elbow") for c in _lash_cmds(u0, k, 3.0)]
+    out, _ = run(cmds + ["FIT"])
+    f = fit_line_of(out, 2)
+    assert abs(f["lash"] - 3.0) < 0.05 and abs(f["uspd"] - k) < 0.01, f
+
+
+def test_start_probe_refused_on_live_channel():         # ST-S1 / ST-S4
+    out, log = run(["SEL 1", "START 1300", "START 1700", "PROBE 1600"])
+    assert out.count("ERR") >= 2 and "already holding" in out
+    w = [off for ch, off in log.writes() if ch == 1 and off < 4096]
+    assert len(w) == 1, w
+
+
+def test_key_pauses_sweep_dwell():                      # ST-S6: a key during a dwell (not only during motion)
+    out, log = run(["SEL 1", "START 1500", "@keyat 2600  ", "SWEEP 1450 1550 25 3000"])
+    assert "# paused" in out and "sweep complete" not in out, out[-800:]
+
+
+def test_bad_channel_refused():                         # ST-S9
+    out, log = run(["SEL 15", "START 1500", "OFF 99"])
+    assert "BAD_CH" in out and "released ch" not in out
+    assert log.writes()[-1][1] != 4096
+
+
+def test_export_invalid_limits():                       # ST-M7: MIN >= MAX never exported as a row
+    out, _ = run(["LIM 0 500 2500", "SEL 0", "JT ROT base", "START 1500", "GO 1200", "PT -25", "GO 1700", "PT 21",
+                  "GO 1500", "PT 2", "GO 2000", "LO", "LIM 0 500 2500", "GO 1000", "HI", "EXPORT"])
+    block, rows, grip = parse_export(out)
+    assert rows == [] and "INVALID" in block, block

@@ -22,14 +22,15 @@ Lineage: v3.0 keeps every command and safety behaviour of v2.3 and adds the mapp
 
 | ID | Requirement |
 | --- | --- |
-| ST-S1 | No channel outputs a pulse until `START` (or `PROBE`). Outputs stay off at boot |
+| ST-S1 | No channel outputs a pulse until `START` (or `PROBE`). Outputs stay off at boot. `START` and `PROBE` are refused on a channel that is already holding (they would jump without slew limiting); use `GO` |
 | ST-S2 | On boot, channels already producing a valid pulse are **adopted**, not reset. `INIT` is the only way to force outputs off by reconfiguring |
 | ST-S3 | Every channel has soft limits, default 1300–1700 µs, inside the absolute 500–2500 µs. Commands outside are clamped |
 | ST-S4 | Moves are slew-rate limited (default 5 µs per 20 ms; ceiling 25 µs per step, floor 10 ms) |
 | ST-S5 | Only the selected channel moves. One joint at a time |
-| ST-S6 | Any keypress during a move pauses it and holds |
+| ST-S6 | Any keypress during a move, a sweep (including its dwell) or an `APPR` pauses it and holds. A line ending of CR+LF counts as one key |
 | ST-S7 | No automatic release by default (`HOLD 0`); the watchdog only pauses |
 | ST-S8 | Saved limits are never applied at boot. `LIMRESTORE` applies them on request |
+| ST-S9 | A command naming a channel outside 0–15 is refused, never clamped onto another channel |
 
 ### Mapping (new in v3.0)
 
@@ -73,7 +74,8 @@ Commands are whole lines, case-insensitive. Numbers may be decimal.
 | `GO us` | Ramp to a pulse |
 | `PROBE us` | Pulse for 200 ms, then release |
 | `SWEEP min max step dwell` | Sweep and return |
-| `JOG` | `+`/`-` step, `1`–`4` = 1/5/10/25 µs, `m` mark, `q` quit |
+| `JOG` | `+`/`-` step, `1`–`4` = 1/5/10/25 µs, `m` mark, `!` release all and quit, `q` quit |
+| `HB` | Heartbeat for a PC program (resets the `WD` timer, prints nothing) |
 | `R`, `X` | Resume a paused move; stop and hold |
 | `MARK label` | Log the pulse with a label |
 | `OFF [ch]`, `!` | Release a channel; release all |
@@ -108,7 +110,11 @@ Commands are whole lines, case-insensitive. Numbers may be decimal.
 | `PTS` | — | List the selected channel's points with residuals from the last fit |
 | `PTDEL n`, `PTCLR` | — | Delete point n, or all points of the selected channel |
 
-Each point prints a data line `PT,<ms>,<arm>,<ch>,<n>,<us>,<kind>,<value>,<side>`.
+Each point prints a data line `PT,<ms>,<arm>,<ch>,<n>,<us>,<kind>,<value>,<side>`. An automatic side is
+printed with a trailing `A` (for example `-1A`) because it is recorded as the side **in pulse terms**
+(−sign of the last pulse change); `FIT` converts it to joint-value terms with the sign of the fitted
+slope, so joints with a negative `USPD` (reversed servos) are handled. A side set with `SIDE +|-` is
+already in joint-value terms.
 
 Precision of the ruler methods (stated in the guide and printed with each point):
 
@@ -151,6 +157,8 @@ For channel c with points (us_i, v_i, s_i), s_i ∈ {−1, 0, +1}:
   [2x 2y 1]·[cx cy k]ᵀ = x² + y², radius = √(k + cx² + cy²). Angle_i = Atan2(x = X_i − cx, y = Y_i − cy)
   (C: atan2(Y − cy, X − cx)), unwrapped along increasing pulse. `PTXY` points and value points cannot be
   mixed in one channel; `FIT` says so.
+- Automatic sides are converted first: s = s_pulse · sign(USPD), with the slope's sign from a fit
+  without the side term.
 - Model: us = US0 + USPD·v + c·s. Linear least squares on [1, v, s] when both sides are present and
   n ≥ 4, else on [1, v]. Then lash = 2·(−c/USPD).
 - Residual in joint units: r_i = v_i − ((us_i − US0)/USPD − (c/USPD)·s_i).
@@ -165,11 +173,12 @@ Warnings:
 | \|USPD\| outside 5–20 µs/deg (rotary) | Unusual slope: check units, or a reading taken on the wrong link |
 | rms > 2 × `PREC` | Scatter larger than your reading precision: look at the worst point |
 | A range end more than 25 % of the points' span beyond them | Extrapolating: add a point near that end, including the behind-the-back side if the joint goes there |
+| Exported MIN ≥ MAX (ends swapped or margins overlapping) | The row is exported as a comment marked INVALID, not as a row |
 | Gravity-loaded joint with only one side tagged | Lash not identifiable from points: take points on both sides of the balance point, or use `WIG` |
 
 ## 5. Data saved to EEPROM
 
-Header (magic `ST3`, layout version 3, arm, margin), then per channel: type, load flag, side mode,
+Header (magic `ST3`, layout version 4, arm, margin), then per channel: type, load flag, side mode,
 name, REF, PREC, range ends with their margins, `WIG` lash, gripper open/hold, and the last `LIM` set;
 then up to 60 points (channel, kind, side, pulse, two floats). Saved after every change. Restored at
 boot with a one-line summary; a session saved by a different layout is discarded. Live soft limits are
@@ -191,11 +200,14 @@ boot with a one-line summary; a session saved by a different layout is discarded
 | ST-S2 | `test_adopt_on_boot` |
 | ST-S3 | `test_soft_limit_clamp` |
 | ST-S4 | `test_slew_rate` |
+| ST-S1 (live channel) | `test_start_probe_refused_on_live_channel` |
+| ST-S6 | `test_key_pauses_sweep_dwell` |
 | ST-S8 | `test_limits_not_restored_at_boot` |
+| ST-S9 | `test_bad_channel_refused` |
 | ST-M2 | `test_lo_hi_pull_limits_in` |
 | ST-M3 | `test_pth_ptd_conversions`, `test_circle_fit` |
 | ST-M4 | `test_auto_side_from_motion` |
-| ST-M5 | `test_fit_recovers_line`, `test_fit_recovers_lash`, `test_fit_warnings` |
+| ST-M5 | `test_fit_recovers_line`, `test_fit_recovers_lash`, `test_fit_lash_negative_slope`, `test_fit_warnings` |
 | ST-M6 | `test_wig` |
-| ST-M7 | `test_export_format` |
+| ST-M7 | `test_export_format`, `test_export_invalid_limits` |
 | ST-M8 | `test_session_survives_reset` |

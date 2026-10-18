@@ -46,11 +46,11 @@ def task_with(**kv):
     txt = TASK
     for k, v in kv.items():
         if k == "APPROACH_LIST":
-            txt, n = re.subn(r"const float APPROACH_LIST\[\] = \{[^}]*\};", f"const float APPROACH_LIST[] = {{{v}}};", txt)
+            txt, n = re.subn(r"const float APPROACH_LIST\[\] = \{[^}]*\};", lambda m: f"const float APPROACH_LIST[] = {{{v}}};", txt)
         elif k in ("BRANCH_POLICY", "FLIP_POLICY"):
             txt, n = re.subn(r"#define " + k + r"\s+\w+", f"#define {k} {v}", txt)
         elif k == "START_PROGRAM":
-            txt, n = re.subn(r"const char START_PROGRAM\[\] PROGMEM =.*?;\n", f"const char START_PROGRAM[] PROGMEM = {v};\n", txt, flags=re.S)
+            txt, n = re.subn(r"const char START_PROGRAM\[\] PROGMEM =.*?;\n", lambda m: f"const char START_PROGRAM[] PROGMEM = {v};\n", txt, flags=re.S)
         elif k == "INIT_WORLD":
             txt, n = re.subn(r"const float INIT_WORLD\[\]\[3\] = \{.*?\};", f"const float INIT_WORLD[][3] = {{ {v} }};", txt)
         else:

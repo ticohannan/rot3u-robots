@@ -41,7 +41,7 @@ const float LEVEL_TOL_DEG = 3.0;
 // DEST is added automatically. Declaring the blocks lets the path check steer around them.
 const float INIT_WORLD[][3] = { {0, 0, 0} };
 
-// ---- program loaded at boot (RUN plays it). One command per line, <= 40 characters.
+// ---- program loaded at boot (RUN plays it). One command per line, <= 48 characters.
 // The Demo 3 video script: 5 single blocks at (10,3) (12,-8) (14,6) (-2,12) (-2,-13),
 // each turned so one face points at the base axis (docs/guides/ik_demo-guide.md).
 const char START_PROGRAM[] PROGMEM =

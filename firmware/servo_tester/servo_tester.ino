@@ -30,7 +30,7 @@
   Lines starting with '#' are for people.
 */
 
-#define FW_VERSION "3.0"
+#define FW_VERSION "3.0"   // review fixes before first hardware run included
 
 #include <Wire.h>
 #include <EEPROM.h>
@@ -76,6 +76,7 @@ Chan chn[NUM_CH];
 
 // Mapping data, saved to EEPROM (DD-ST section 5)
 enum PtKind : uint8_t { K_V = 0, K_H = 1, K_D = 2, K_XY = 3 };
+const uint8_t K_AUTO = 0x80, K_MASK = 0x7F;
 struct Meta {
   uint8_t  type;                             // J_ROT, J_LIN, J_GRIP; 255 = not set
   uint8_t  load;
@@ -90,7 +91,7 @@ struct Meta {
   uint8_t  loMargin, hiMargin;               // MARGIN in force when LO / HI was recorded
 };
 struct Point {
-  uint8_t  ch, kind;
+  uint8_t  ch, kind;                         // kind | K_AUTO when side is in pulse terms (automatic)
   int8_t   side;
   uint16_t us;
   float    a, b;                             // value (deg/mm) in a; for K_XY: x in a, y in b (cm)
@@ -105,7 +106,7 @@ struct Session {
   Point    pts[MAX_PTS];
 };
 Session ses;
-const uint8_t SES_LAYOUT = 3;
+const uint8_t SES_LAYOUT = 4;
 
 struct FitRes {
   bool  ok;
@@ -143,6 +144,7 @@ uint32_t probeUntil = 0;
 bool     apprPending = false;                // APPR: second leg target
 uint16_t apprTarget  = 0;
 
+bool     lastWasCR = false;
 bool     jogMode = false;
 uint16_t jogStep = 10;
 
@@ -317,10 +319,12 @@ void printPoint(uint8_t i) {
   Serial.print(F("PT,")); Serial.print(millis()); Serial.print(','); Serial.print(ses.arm);
   Serial.print(','); Serial.print(p.ch); Serial.print(','); Serial.print(i + 1);
   Serial.print(','); Serial.print(p.us); Serial.print(',');
-  Serial.print(p.kind == K_V ? F("V") : p.kind == K_H ? F("H") : p.kind == K_D ? F("D") : F("XY"));
+  uint8_t k = p.kind & K_MASK;
+  Serial.print(k == K_V ? F("V") : k == K_H ? F("H") : k == K_D ? F("D") : F("XY"));
   Serial.print(','); Serial.print(p.a, 2);
-  if (p.kind == K_XY) { Serial.print(';'); Serial.print(p.b, 2); }
-  Serial.print(','); Serial.println(p.side);
+  if (k == K_XY) { Serial.print(';'); Serial.print(p.b, 2); }
+  Serial.print(','); Serial.print(p.side);
+  Serial.println((p.kind & K_AUTO) ? F("A") : F(""));
 }
 
 bool addPoint(uint8_t kind, float a, float b) {
@@ -328,7 +332,7 @@ bool addPoint(uint8_t kind, float a, float b) {
   if (ses.npts >= MAX_PTS) { emitErr("FULL", F("point store full - PTDEL or PTCLR some")); return false; }
   Meta &m = ses.meta[sel];
   int8_t side = m.sideMode;
-  if (side == 0) side = -chn[sel].dir;      // dragged + lags: sits on the - side of its play
+  if (side == 0) { side = -chn[sel].dir; kind |= K_AUTO; }   // pulse terms; FIT converts with the slope sign
   if (m.load && m.sideMode == 0)
     Serial.println(F("# note: gravity-loaded joint with SIDE A - say which way it would fall: SIDE + or SIDE -"));
   Point &p = ses.pts[ses.npts];
@@ -346,10 +350,11 @@ void listPoints(uint8_t c) {
     const Point &p = ses.pts[i];
     if (p.ch != c) continue;
     Serial.print(F("#  ")); Serial.print(i + 1); Serial.print(' '); Serial.print(p.us); Serial.print(' ');
-    Serial.print(p.kind == K_V ? F("V ") : p.kind == K_H ? F("H ") : p.kind == K_D ? F("D ") : F("XY "));
+    uint8_t k = p.kind & K_MASK;
+    Serial.print(k == K_V ? F("V ") : k == K_H ? F("H ") : k == K_D ? F("D ") : F("XY "));
     Serial.print(p.a, 2);
-    if (p.kind == K_XY) { Serial.print(','); Serial.print(p.b, 2); }
-    Serial.print(F(" side ")); Serial.print(p.side);
+    if (k == K_XY) { Serial.print(','); Serial.print(p.b, 2); }
+    Serial.print(F(" side ")); Serial.print(p.side); if (p.kind & K_AUTO) Serial.print(F(" (pulse terms)"));
     if (fitr.ok && !isnan(resid[i])) { Serial.print(F("  resid ")); Serial.print(resid[i], 2); }
     Serial.println();
   }
@@ -392,7 +397,7 @@ bool solveSym(float M[3][3], float r[3], uint8_t p, float x[3], float inv[3][3])
 // Joint value of point i (deg or mm). For K_XY it needs the circle fit (fitr.cx, cy).
 float pointValue(uint8_t i) {
   const Point &p = ses.pts[i];
-  if (p.kind != K_XY) return p.a;
+  if ((p.kind & K_MASK) != K_XY) return p.a;
   return atan2f(p.b - fitr.cy, p.a - fitr.cx) * RAD_TO_DEG;   // class Atan2(x = X - cx, y = Y - cy)
 }
 
@@ -400,7 +405,7 @@ bool fitChannel(uint8_t c, bool verbose) {
   memset(&fitr, 0, sizeof(fitr));
   for (uint8_t i = 0; i < MAX_PTS; i++) resid[i] = NAN;
   uint8_t idx[MAX_PTS], n = 0, nxy = 0;
-  for (uint8_t i = 0; i < ses.npts; i++) if (ses.pts[i].ch == c) { idx[n++] = i; if (ses.pts[i].kind == K_XY) nxy++; }
+  for (uint8_t i = 0; i < ses.npts; i++) if (ses.pts[i].ch == c) { idx[n++] = i; if ((ses.pts[i].kind & K_MASK) == K_XY) nxy++; }
   fitr.n = n;
   if (n < 2) { if (verbose) { Serial.print(F("# ch ")); Serial.print(c); Serial.println(F(": need at least 2 points")); } return false; }
   if (nxy && nxy != n) { if (verbose) Serial.println(F("# PTXY points cannot be mixed with value points on one channel - PTDEL one kind")); return false; }
@@ -429,15 +434,29 @@ bool fitChannel(uint8_t c, bool verbose) {
   } else {
     for (uint8_t k = 0; k < n; k++) v[k] = ses.pts[idx[k]].a;
   }
+  // automatic sides are in pulse terms: convert with the sign of the slope from a fit without sides
+  float sgnK;
+  {
+    float sv = 0, su = 0, svv = 0, svu = 0;
+    for (uint8_t k = 0; k < n; k++) { float u = ses.pts[idx[k]].us; sv += v[k]; su += u; svv += v[k] * v[k]; svu += v[k] * u; }
+    float den = n * svv - sv * sv;
+    sgnK = (den != 0 && (n * svu - sv * su) / den < 0) ? -1.0f : 1.0f;
+  }
+  int8_t sd[MAX_PTS];
   bool hasP = false, hasM = false;
-  for (uint8_t k = 0; k < n; k++) { if (ses.pts[idx[k]].side > 0) hasP = true; if (ses.pts[idx[k]].side < 0) hasM = true; }
+  for (uint8_t k = 0; k < n; k++) {
+    const Point &q = ses.pts[idx[k]];
+    sd[k] = (q.kind & K_AUTO) ? (int8_t)(q.side * sgnK) : q.side;
+    if (sd[k] > 0) hasP = true;
+    if (sd[k] < 0) hasM = true;
+  }
   fitr.both = hasP && hasM;
   uint8_t p = (fitr.both && n >= 4) ? 3 : 2;
   // centre the values for conditioning
   float vm = 0; for (uint8_t k = 0; k < n; k++) vm += v[k]; vm /= n;
   float M[3][3] = {{0}}, r[3] = {0}, x[3], inv[3][3];
   for (uint8_t k = 0; k < n; k++) {
-    float row[3] = {1.0f, v[k] - vm, (float)ses.pts[idx[k]].side};
+    float row[3] = {1.0f, v[k] - vm, (float)sd[k]};
     float us = ses.pts[idx[k]].us;
     for (uint8_t i = 0; i < p; i++) { r[i] += row[i] * us; for (uint8_t j = 0; j < p; j++) M[i][j] += row[i] * row[j]; }
   }
@@ -449,7 +468,7 @@ bool fitChannel(uint8_t c, bool verbose) {
   float ssr = 0; fitr.worst = 0; fitr.worstIdx = -1;
   fitr.vmin = v[0]; fitr.vmax = v[0];
   for (uint8_t k = 0; k < n; k++) {
-    float pred = (ses.pts[idx[k]].us - fitr.us0 - cs * ses.pts[idx[k]].side) / fitr.uspd;
+    float pred = (ses.pts[idx[k]].us - fitr.us0 - cs * sd[k]) / fitr.uspd;
     float e = v[k] - pred;
     resid[idx[k]] = e; ssr += e * e;
     if (fabs(e) > fitr.worst) { fitr.worst = fabs(e); fitr.worstIdx = idx[k]; }
@@ -584,6 +603,11 @@ void doExport() {
     if (!fitChannel(c, false)) continue;
     uint16_t lo, hi;
     exportLims(c, lo, hi);
+    if (lo >= hi) {
+      Serial.print(F("  // ch")); Serial.print(c); Serial.print(F(" INVALID: MIN ")); Serial.print(lo);
+      Serial.print(F(" >= MAX ")); Serial.print(hi); Serial.println(F(" (LO/HI swapped or margins overlap) - re-mark LO and HI"));
+      continue;
+    }
     Serial.print(F("  { ")); printPad(c, 2); Serial.print(m.type == J_LIN ? F(", J_LIN, ") : F(", J_ROT, "));
     printPadF(fitr.us0, 7, 1); Serial.print(F(", ")); printPadF(fitr.uspd, 8, 3); Serial.print(F(", "));
     printPad(lo, 4); Serial.print(F(", ")); printPad(hi, 4); Serial.print(F(", "));
@@ -597,7 +621,8 @@ void doExport() {
     Meta &m = ses.meta[gripCh];
     uint16_t lo, hi;
     exportLims(gripCh, lo, hi);
-    Serial.print(F("const GripCal GRIP = { ")); Serial.print(gripCh); Serial.print(F(", "));
+    if (lo >= hi) Serial.println(F("// GRIP INVALID: MIN >= MAX - re-mark LO and HI on the gripper"));
+    Serial.print(lo >= hi ? F("// const GripCal GRIP = { ") : F("const GripCal GRIP = { ")); Serial.print(gripCh); Serial.print(F(", "));
     Serial.print(m.openUs); Serial.print(F(", ")); Serial.print(m.holdUs); Serial.print(F(", "));
     Serial.print(lo); Serial.print(F(", ")); Serial.print(hi); Serial.println(F(" };"));
   } else Serial.println(F("// no GRIP channel defined (JT GRIP, SETP OPEN, SETP HOLD)"));
@@ -754,6 +779,7 @@ void handleLine(char *line) {
   if (!strcmp(cmd, "START")) {
     long us;
     if (!nextInt(us)) { emitErr("BAD_ARG", F("START us")); return; }
+    if (chn[sel].active) { emitErr("ACTIVE", F("channel already holding - use GO us (slew limited)")); return; }
     applyUs(sel, clampToLimits(sel, us));
     chn[sel].dir = 0;
     mstate = M_IDLE;
@@ -772,6 +798,7 @@ void handleLine(char *line) {
   if (!strcmp(cmd, "PROBE")) {
     long us;
     if (!nextInt(us)) { emitErr("BAD_ARG", F("PROBE us")); return; }
+    if (chn[sel].active) { emitErr("ACTIVE", F("channel already holding - PROBE would jump, then let it drop")); return; }
     applyUs(sel, clampToLimits(sel, us));
     probing = true; probeCh = sel; probeUntil = millis() + PROBE_MS;
     emitPos(sel, "PROBE");
@@ -797,7 +824,11 @@ void handleLine(char *line) {
   if (!strcmp(cmd, "MARK")) { char *t = strtok(NULL, " "); emitMark(sel, t ? t : "mark"); return; }
   if (!strcmp(cmd, "OFF")) {
     long c;
-    uint8_t target = nextInt(c) ? (uint8_t)constrain(c, 0L, (long)NUM_CH - 1) : sel;
+    uint8_t target = sel;
+    if (nextInt(c)) {
+      if (c < 0 || c >= NUM_CH) { emitErr("BAD_CH", F("0-15 - nothing released")); return; }
+      target = (uint8_t)c;
+    }
     releaseCh(target);
     if (target == sel) { mstate = M_IDLE; apprPending = false; }
     Serial.print(F("# released ch ")); Serial.println(target);
@@ -988,9 +1019,12 @@ void readSerial() {
   while (Serial.available()) {
     char c = Serial.read();
     lastRx = millis();
+    if (c == '\n' && lastWasCR) { lastWasCR = false; continue; }   // CR+LF is one line ending
+    lastWasCR = (c == '\r');
     if (jogMode) { handleJogKey(c); continue; }
-    if (mstate == M_MOVING) {                 // any keypress pauses
+    if (mstate == M_MOVING || (mstate == M_IDLE && (sweeping || apprPending))) {   // any keypress pauses
       while (Serial.available()) Serial.read();
+      if (mstate == M_IDLE) mTarget = chn[sel].curUs;   // paused in a dwell: R continues the sequence
       mstate = M_PAUSED;
       Serial.println(F("# paused - holding (R to resume, X to stop)"));
       emitPos(sel, "PAUSED");
@@ -1028,9 +1062,8 @@ void service() {
           else Serial.println(F("# at the target"));
         } else if (!sweeping) {
           Serial.print(F("# at ")); Serial.print(chn[sel].curUs);
-          Serial.print(F(" us, side of play if measured now: "));
-          int8_t sd = ses.meta[sel].sideMode ? ses.meta[sel].sideMode : -chn[sel].dir;
-          Serial.println(sd > 0 ? F("+") : sd < 0 ? F("-") : F("unknown"));
+          if (ses.meta[sel].sideMode) Serial.println(ses.meta[sel].sideMode > 0 ? F(" us, SIDE +") : F(" us, SIDE -"));
+          else Serial.println(chn[sel].dir > 0 ? F(" us, arrived from below") : chn[sel].dir < 0 ? F(" us, arrived from above") : F(" us"));
         }
       } else {
         long s = d;

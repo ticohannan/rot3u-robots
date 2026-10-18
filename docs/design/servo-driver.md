@@ -14,7 +14,7 @@ by adding one driver class, without touching the sketches.
 | --- | --- |
 | DRV-1 | No output produces a pulse until the sketch writes that channel. `begin()` on a cold board leaves every output off |
 | DRV-2 | A driver that can read its outputs back reports the pulse each live channel is already producing, so a sketch can **adopt** a holding arm after a reset instead of letting it drop |
-| DRV-3 | `write(ch, us)` sets the pulse width in µs. The driver clamps to its absolute range (500–2500 µs) and reports the value it actually set; the sketch's soft limits sit above this |
+| DRV-3 | `write(ch, us)` sets the pulse width in µs, clamped to the absolute range (500–2500 µs); it returns false if the hardware did not accept it. The sketch's soft limits sit above this |
 | DRV-4 | `release(ch)` stops the pulse completely (the servo goes limp) |
 | DRV-5 | Errors are returned, not printed. The sketch decides how to report them |
 | DRV-6 | The interface is hardware-neutral: no I2C, pin or register details leak into the sketches, except through the driver's own `diag()` |
@@ -58,7 +58,8 @@ rev 1.0:
   pulse is 500–2500 µs, with one count (4.9 µs) of tolerance: a channel written at exactly 500 µs reads
   back as 499 µs and must still be adopted. (v2.3 and ik_demo v0.4 rejected it, so a wrist roll holding
   at 500 µs was not adopted after a reset.)
-- Configure: SLEEP → write prescale → wake → 5 ms → RESTART | AI.
+- Configure: SLEEP → write prescale → ALL_LED_OFF_H (0xFD) = full-off, so no old pulse resumes →
+  wake → 5 ms → RESTART | AI → release each channel.
 - Release = full-off bit (OFF_H bit 4).
 - Constructor arguments: I2C address (default 0x40), number of channels used (≤ 16), oscillator Hz.
 - `diag()` prints MODE1 and PRESCALE.
@@ -117,5 +118,6 @@ sketch folder, so each sketch folder holds a copy. `tools/sync_common.py` writes
 | DRV-2 adopt keeps live channels | `tests/test_driver.py::test_adopt_live_channels` |
 | DRV-3 clamp to 500–2500 | `tests/test_driver.py::test_write_clamps` |
 | DRV-4 release sets full-off | `tests/test_driver.py::test_release_full_off` |
+| Reconfigure never resumes old pulses | `tests/test_driver.py::test_reconfigure_all_off_first` |
 | Copies identical | `tests/test_sync.py::test_common_copies_identical` |
 | Both drivers compile for the Mega | `tests/test_compile.py` |

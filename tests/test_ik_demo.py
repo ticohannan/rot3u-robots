@@ -232,3 +232,36 @@ def test_lash_suggestion():                              # IK-L3
     assert any(abs(v) >= 10 for v in d[:4]) and float(m.group(2)) > 3.0, m.groups()
     out, _ = hb.run(build("sir"), ["P 10 3 0"])
     assert "not measured for this robot" in out
+
+
+# ------------------------------------------------------------------- review fixes
+def test_non_finite_refused():                           # IK-S11
+    out, log = hb.run(build("sir"), ["HOME", "P 10 3 0", "AIR 100", "T 1", "J nan 90 -60 -60 0",
+                                     "J inf 90 -60 -60 0", "P nan 3 0", "W"])
+    n_home = len(hb.run(build("sir"), ["HOME"])[1].writes())
+    assert len(log.writes()) == n_home, "something moved after HOME"
+    assert out.count("not a number") >= 3 and "# P x y z first" in out
+
+
+def test_home_with_idle_gripper():                       # IK-S12
+    st = Path(tempfile.mkdtemp()) / "s.bin"
+    hb.run(build("sir"), ["HOME", "M 10 3 0.5"], state=st)
+    b = bytearray(st.read_bytes()); b[6 + 4 * 5 + 3] |= 0x10; st.write_bytes(bytes(b))   # gripper channel off
+    out, log = hb.run(build("sir"), ["HOME"], state=st)
+    # the adopted arm joints go the normal way: straight up first, then a path-checked move
+    assert "adopted live channels" in out and "backing straight up" in out and "# at the ready pose" in out, out[-1200:]
+
+
+def test_program_line_too_long():                        # IK-G6
+    long = "ECHO " + "x" * 50
+    out, _ = hb.run(build("sir"), ["PROG", long, "ECHO ok", "END", "LIST"])
+    assert "line refused: longer than 48" in out and "1: ECHO ok" in out
+    task = C.task_with(START_PROGRAM='"' + long + '\\n" "ECHO second\\n"')
+    out, _ = hb.run(build("longprog", task=task), ["LIST"])
+    assert "start program line 1 too long" in out and "2: ECHO second" in out
+
+
+def test_stack_table_full():                             # IK-G5: 12 stacks, then refusals, no crash
+    cmds = ["HOME"] + [f"STK {x} 15 1" for x in range(-12, 10, 2)] + ["DEST -10 -10", "TOWER -8 -12 2", "W"]
+    out, _ = hb.run(build("sir"), cmds)
+    assert "too many stacks" in out and "# DEST" in out
