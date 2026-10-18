@@ -52,3 +52,10 @@ RUN ON HARDWARE*. Put it in the sketch's header comment and in the changelog row
 
 Every number recorded about a robot carries its method and uncertainty (for example "ruler, ±1 mm").
 Calibration blocks keep the comment lines `servo_tester` writes.
+
+## 6. Authorship and AI assistance
+
+The human who commits a change is its author and is responsible for it. AI tools may assist, but are
+never listed as authors or co-authors: no `Co-Authored-By` lines or author fields naming a tool. A
+commit prepared with AI assistance may say so in its message body (for example "Prepared with AI
+assistance").

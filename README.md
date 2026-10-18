@@ -44,6 +44,11 @@ clamps every pulse to soft limits, limits speed, and stops on any keypress.
 
 Design document first, then code, then a test: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Authorship
+
+Author: ticohannan, who is responsible for this code and documentation. Prepared with the
+assistance of AI tools; every change is reviewed, tested and accepted by the author.
+
 ## Licence
 
 BSD 3-Clause, see [LICENSE](LICENSE).
