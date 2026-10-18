@@ -1,0 +1,12 @@
+# Normalise line endings in the repository; Windows checkouts get CRLF in the working folder.
+* text=auto
+*.ino text
+*.h   text
+*.cpp text
+*.py  text eol=lf
+*.md  text
+*.yml text eol=lf
+*.sh  text eol=lf
+*.png binary
+*.jpg binary
+*.pdf binary

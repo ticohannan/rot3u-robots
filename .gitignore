@@ -1,0 +1,13 @@
+# build output of the tests
+tests/build/
+__pycache__/
+*.pyc
+.pytest_cache/
+# editors and OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
+# serial-monitor logs (keep the ones you want under logs/ by force-adding them)
+*.log
